@@ -12,7 +12,7 @@ public class CmdExecuteResultHandler extends DefaultExecuteResultHandler {
     private ByteArrayOutputStream out;
     private ByteArrayOutputStream err;
 
-    private String output;
+    private volatile String finalOutput;
 
     public CmdExecuteResultHandler(
             ByteArrayOutputStream out, ByteArrayOutputStream err) {
@@ -23,31 +23,41 @@ public class CmdExecuteResultHandler extends DefaultExecuteResultHandler {
     @Override
     public void onProcessComplete(int exitValue) {
         super.onProcessComplete(exitValue);
-        obtainOutputAndCleanUp();
+        obtainStandardOutputAndCleanUp();
     }
 
     @Override
     public void onProcessFailed(ExecuteException e) {
         super.onProcessFailed(e);
-        obtainOutputAndCleanUp();
+        obtainStandardOutputAndCleanUp();
     }
 
-    private void obtainOutputAndCleanUp() {
+    private void obtainStandardOutputAndCleanUp() {
         try {
-            output = out.toString(Charsets.UTF_8.name());
-        } catch (UnsupportedEncodingException ex) {
-            throw new RuntimeException(ex);
+            finalOutput = getStandardOutput();
         } finally {
             IOUtils.closeQuietly(out);
             IOUtils.closeQuietly(err);
         }
     }
 
-    public String getOutput() {
-        if (!hasResult()) {
-            throw new IllegalStateException("The process has not exited yet therefore no result is available ...");
+    public String getErrorOutput() {
+        try {
+            return err.toString(Charsets.UTF_8.name());
+        } catch (UnsupportedEncodingException e) {
+            throw new RuntimeException(e);
         }
+    }
 
-        return output;
+    public String getStandardOutput() {
+        if (finalOutput == null) {
+            try {
+                return out.toString(Charsets.UTF_8.name());
+            } catch (UnsupportedEncodingException e) {
+                throw new RuntimeException(e);
+            }
+        } else {
+            return finalOutput;
+        }
     }
 }

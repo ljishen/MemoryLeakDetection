@@ -10,14 +10,23 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.net.URL;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class Util {
     public static final String MONKEY_RUNNER = "monkeyrunner.bat";
     public static final String ADB = "adb";
     public static final String SHELL = "shell";
-    public static final String CONVERTED_HEAP_FILE_PREFIX = "converted-";
 
+    private static final String CONVERTED_HEAP_FILE_PREFIX = "converted-";
+    private static final String LOCAL_HEAP_FILE_PREFIX = "memory_leak_analyzer_";
     private static final String HEAP_FILE_SUFFIX = ".hprof";
+    private static final Pattern PACKAGE_NAME = Pattern.compile("Recent #0.+?=([\\.\\w]+)");
+    private static final Pattern PID = Pattern.compile("\\n.+?\\s(\\d+)");
+    private static final Pattern DEVICE_INFO =
+            Pattern.compile("List of devices attached[\\s]+([\\-\\d\\w+]+)\\s+device\\s?([^\\r\\n]*)");
+
 
     public static CmdExecuteResultHandler executeCmdAsync(ExecuteWatchdog watchdog,
                                        String executable, String... arguments)
@@ -107,21 +116,20 @@ public class Util {
         }
     }
 
-    public static File dumpheap(ApplicationInfo appInfo) throws IOException {
-        String localHeapFilename = localHeapFilename(appInfo.pid());
+    public static File dumpheap(ApplicationInfo appInfo) throws IOException, InterruptedException {
+        String localHeapFilename = localHeapFilename(appInfo.getPid());
         final String localHeapFileFolder = "/mnt/sdcard/Download/";
         String localHeapFilePath = localHeapFileFolder + localHeapFilename + HEAP_FILE_SUFFIX;
 
-        boolean isEmulator = executeCmd(ADB, "devices").contains("emulator");
-        if (isEmulator) {
-            System.out.println("Emulator detected");
-            executeCmd(ADB, SHELL, "rm", localHeapFileFolder + "*");
-        } else {
-            executeCmd(ADB, SHELL, "rm", localHeapFilePath);
-        }
+        executeCmd(ADB,
+                SHELL,
+                "rm",
+                localHeapFileFolder +
+                        (appInfo.deviceSerialNumber().startsWith("emulator") ? "" : LOCAL_HEAP_FILE_PREFIX) +
+                        "*");
 
         // TODO: not working before Android 3.0?
-        executeCmd(ADB, SHELL, "am", "dumpheap", appInfo.pid(), localHeapFilePath);
+        executeCmd(ADB, SHELL, "am", "dumpheap", appInfo.getPid(), localHeapFilePath);
 
         // Wait until heap file created
         long lastFileSize;
@@ -129,11 +137,7 @@ public class Util {
         final int checkIntervalInSeconds = 5;
         do {
             System.out.println("Check heap dump after " + checkIntervalInSeconds + " seconds...");
-            try {
-                Thread.sleep(checkIntervalInSeconds * 1000);
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-            }
+            Thread.sleep(TimeUnit.SECONDS.toMillis(checkIntervalInSeconds));
             lastFileSize = fileSize;
             fileSize = fileSize(localHeapFilePath);
         } while (lastFileSize != fileSize);
@@ -156,8 +160,12 @@ public class Util {
         return convertedHeapFile;
     }
 
-    public static String localHeapFilename(String pid) {
-        return "memory_leak_analyzer_" + pid;
+    private static String localHeapFilename(String pid) {
+        return LOCAL_HEAP_FILE_PREFIX + pid;
+    }
+
+    public static String convertedHeapFilePrefix(String pid) {
+        return CONVERTED_HEAP_FILE_PREFIX + localHeapFilename(pid);
     }
 
     private static long fileSize(String filePath) throws IOException {
@@ -168,5 +176,69 @@ public class Util {
             throw new IOException(output);
         }
         return Long.valueOf(StringUtils.substringBefore(output, " "));
+    }
+
+    public static ApplicationInfo getForegroundAppInfo() {
+        ApplicationInfo appInfo = null;
+        try {
+            String devicesInfo = executeCmd(ADB, "devices", "-l");
+            Matcher m = DEVICE_INFO.matcher(devicesInfo);
+            if (m.find()) {
+                appInfo = new ApplicationInfo(m.group(1), m.group(2));
+                System.out.println("Select device " + appInfo.deviceSerialNumber());
+            } else {
+                return appInfo;
+            }
+
+            String activitiesInfo = Util.executeCmd(
+                    Util.ADB,
+                    "-s",
+                    appInfo.deviceSerialNumber(),
+                    Util.SHELL,
+                    "dumpsys",
+                    "activity",
+                    "activities");
+            m = PACKAGE_NAME.matcher(activitiesInfo);
+            if (m.find()) {
+                appInfo.setPackageName(m.group(1));
+                int length = appInfo.getPackageName().length();
+
+                // In command "adb shell ps [package]", package name can only be matched with its last 15 characters.
+                String packageAbbreviation = length > 15 ?
+                        appInfo.getPackageName().substring(length - 15, length) : appInfo.getPackageName();
+
+                String pidInfo = Util.executeCmd(
+                        Util.ADB,
+                        "-s",
+                        appInfo.deviceSerialNumber(),
+                        Util.SHELL,
+                        "ps",
+                        packageAbbreviation);
+                m = PID.matcher(pidInfo);
+                if (m.find()) {
+                    appInfo.setPid(m.group(1));
+                }
+            }
+        } catch (IOException e) {
+            // TODO: use log4j instead
+            e.printStackTrace();
+        }
+
+        // TODO: use log4j inform mode instead
+        System.out.println(appInfo);
+
+        return appInfo;
+    }
+
+    // XXX: Only for test
+    public static void main(String[] args) {
+        ApplicationInfo appInfo = getForegroundAppInfo();
+        try {
+            dumpheap(appInfo);
+        } catch (IOException e) {
+            e.printStackTrace();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
     }
 }

@@ -3,33 +3,91 @@ package org.tree;
 import org.apache.commons.exec.ExecuteWatchdog;
 import org.apache.commons.io.Charsets;
 import org.apache.commons.io.IOUtils;
-import org.tree.model.ClassInstanceCount;
+import org.tree.model.ApplicationInfo;
 import org.tree.utils.CmdExecuteResultHandler;
 import org.tree.utils.Util;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class HeapdumpAnalyzer {
-    private static final Pattern CLASS_INSTANCE_COUNT = Pattern.compile("^(\\d+).+>(\\d+).+class ([\\.\\w\\d\\$]+)", Pattern.MULTILINE);
+    private static final Pattern CLASS_INSTANCE_COUNT = Pattern.compile("(\\d+).+class ([\\.\\w\\d\\$\\[\\]]+)");
+    private static final int MINIMUM_FILE_COUNT = 4;
 
     private String packageName;
-    private String hprof;
-    private String baselineHprof;
+    private List<File> hprofs;
 
-    public HeapdumpAnalyzer(String packageName, String hprof, String baselineHprof) {
+    public HeapdumpAnalyzer(String packageName, List<File> hprofs) {
         this.packageName = packageName;
-        this.hprof = hprof;
-        this.baselineHprof = baselineHprof;
+        this.hprofs = hprofs;
+
+        if (hprofs.size() < MINIMUM_FILE_COUNT) {
+            throw new IllegalArgumentException("Require at lease " + MINIMUM_FILE_COUNT + " HPROF files to analyze!");
+        }
+
+        // newer file first
+        Collections.sort(this.hprofs, new Comparator<File>() {
+            @Override
+            public int compare(File o1, File o2) {
+                if ((o1).lastModified() > (o2).lastModified()) {
+                    return -1;
+                } else if ((o1).lastModified() < (o2).lastModified()) {
+                    return 1;
+                } else {
+                    return 0;
+                }
+            }
+        });
     }
 
-    public void show() throws IOException {
+    public void analyze() throws IOException, InterruptedException {
+        Map<String, List<Integer>> classInstanceCounts = collectClassInstanceCounts();
+
+        System.out.println("\n========= Leak Suspect Classes (Insufficient\tClass\tInstance Counts\tIncrease Ratio\tMin Ratio) =========");
+
+        for (Map.Entry<String, List<Integer>> e : classInstanceCounts.entrySet()) {
+            List<Integer> counts = e.getValue();
+            if (counts.size() < MINIMUM_FILE_COUNT) {
+//                System.out.println("T\t" + e.getKey() + "\t" + counts + "\t[]\t[]");
+                continue;
+            }
+
+            List<Float> increaseRatio = new ArrayList<Float>(counts.size() - 1);
+
+            float minRatio = Integer.MAX_VALUE;
+            int minRatioIndex = Integer.MAX_VALUE;
+            for (int i = 1;  i < counts.size(); i++) {
+                float delta;
+                int current = counts.get(i);
+                delta = current == 0 ? 0 : (1.0f * counts.get(i - 1) / current);
+                increaseRatio.add(delta);
+
+                if (delta < minRatio) {
+                    minRatio = delta;
+                    minRatioIndex = increaseRatio.size() - 1;
+                }
+            }
+
+            if (minRatio < Math.pow(10, -5)) {
+                increaseRatio.remove(minRatioIndex);
+            }
+
+            if (Collections.min(increaseRatio) > 1) {
+                System.out.println("F\t" + e.getKey() + "\t" + counts + "\t" + increaseRatio + "\t" + minRatio);
+            }
+        }
+    }
+
+    private Map<String, List<Integer>> collectClassInstanceCounts() throws InterruptedException, IOException {
+        Map<String, List<Integer>> classInstanceCounts = new HashMap<String, List<Integer>>();
+
         ExecuteWatchdog watchdog = new ExecuteWatchdog(ExecuteWatchdog.INFINITE_TIMEOUT);
         HttpURLConnection connection = null;
         InputStream is = null;
@@ -37,62 +95,85 @@ public class HeapdumpAnalyzer {
         String result;
         CmdExecuteResultHandler executeResultHandler = null;
 
-        try {
-            executeResultHandler = Util.executeCmdAsync(watchdog, "jhat", "-baseline", baselineHprof, hprof);
-            System.out.println("Parsing HPROF Result By jhat...");
+        final int checkIntervalInSeconds = 3;
+        for (int i = 0; i < hprofs.size(); i++) {
+            try {
+                executeResultHandler = Util.executeCmdAsync(watchdog, "jhat", hprofs.get(i).getPath());
+                System.out.println("Parsing HPROF [" + i + "] By jhat...");
 
-            connection = (HttpURLConnection) new URL("http://127.0.0.1:7000/showInstanceCounts/").openConnection();
+                String tmpOutput;
+                do {
+                    System.out.println("Check jhat parse status after " + checkIntervalInSeconds + " seconds...");
+                    Thread.sleep(TimeUnit.SECONDS.toMillis(checkIntervalInSeconds));
 
-            connection.setConnectTimeout(20000);
-            connection.setReadTimeout(20000);
-            connection.setRequestMethod("GET");
+                    if (executeResultHandler.hasResult()) {
+                        throw new IOException(executeResultHandler.getErrorOutput(), executeResultHandler.getException());
+                    }
 
-            is = connection.getInputStream();
+                    tmpOutput = executeResultHandler.getStandardOutput();
+                } while (!tmpOutput.contains("Server is ready."));
 
-            System.out.println("Downloading Instance Counts for All Classes...");
-            result = IOUtils.toString(is, Charsets.UTF_8);
-        } catch(IOException e) {
-            if (executeResultHandler != null && executeResultHandler.hasResult()) {
-                System.err.println(executeResultHandler.getOutput());
-            }
-            throw e;
-        } finally {
-            IOUtils.closeQuietly(is);
-            IOUtils.close(connection);
-            watchdog.destroyProcess();
-        }
+                connection = (HttpURLConnection) new URL("http://127.0.0.1:7000/showInstanceCounts/").openConnection();
 
-        List<ClassInstanceCount> cics = new ArrayList<ClassInstanceCount>();
-        Matcher m = CLASS_INSTANCE_COUNT.matcher(result);
+                connection.setConnectTimeout(20000);
+                connection.setReadTimeout(20000);
+                connection.setRequestMethod("GET");
 
-        if (m.find()) {
-            final int leakThreshold = MemoryLeakAnalyzer.PLAY_BACK_LOOPS / 3;
-            System.out.println("leakThreshold " + leakThreshold);
+                is = connection.getInputStream();
 
-            System.out.println("========= Leak Suspect Classes =========");
-            do {
-                int newCount = Integer.valueOf(m.group(2));
-                String className = m.group(3);
-
-                // Only filter new created instances > increaseThreshold AND className start with package name.
-                if (newCount > leakThreshold && className.startsWith(packageName)) {
-                    ClassInstanceCount cic = new ClassInstanceCount(Integer.valueOf(m.group(1)), newCount, className);
-                    cics.add(cic);
-                    System.out.println(cic);
+                System.out.println("Downloading Instance Counts for All Classes...");
+                result = IOUtils.toString(is, Charsets.UTF_8);
+            } catch (IOException e) {
+                if (executeResultHandler != null) {
+                    System.err.println(executeResultHandler.getStandardOutput());
                 }
-            } while (m.find());
-        } else {
-            System.err.println("Invalid Clsass Instances Result");
+                throw e;
+            } finally {
+                IOUtils.closeQuietly(is);
+                IOUtils.close(connection);
+                watchdog.destroyProcess();
+                executeResultHandler = null;
+            }
+
+            Matcher m = CLASS_INSTANCE_COUNT.matcher(result);
+            if (m.find()) {
+                do {
+                    String className = m.group(2);
+                    if (!className.startsWith("com.wandoujia")) {
+                        continue;
+                    }
+
+                    List<Integer> counts;
+                    if (!classInstanceCounts.containsKey(className)) {
+                        counts = new ArrayList<Integer>();
+                        classInstanceCounts.put(className, counts);
+                    } else {
+                        counts = classInstanceCounts.get(className);
+                    }
+                    counts.add(Integer.valueOf(m.group(1)));
+                } while (m.find());
+            } else {
+                throw new IOException("Invalid Clsass Instances Result from " + hprofs.get(i));
+            }
         }
+        return classInstanceCounts;
     }
 
     // XXX: Only for test
     public static void main(String[] args) {
+        ApplicationInfo appInfo = Util.getForegroundAppInfo();
+
+        List<File> hprofs = Arrays.asList(new File("C:\\Users\\Libram\\AppData\\Local\\Temp\\converted-memory_leak_analyzer_68134881204037259280478.hprof"),
+                new File("C:\\Users\\Libram\\AppData\\Local\\Temp\\converted-memory_leak_analyzer_6813774127410050284883.hprof"),
+                new File("C:\\Users\\Libram\\AppData\\Local\\Temp\\converted-memory_leak_analyzer_68131730521599528387336.hprof"),
+                new File("C:\\Users\\Libram\\AppData\\Local\\Temp\\converted-memory_leak_analyzer_68131063480794662111285.hprof"),
+                new File("C:\\Users\\Libram\\AppData\\Local\\Temp\\converted-memory_leak_analyzer_68136283695343741391967.hprof"));
+
         try {
-            new HeapdumpAnalyzer("",
-                    "C:\\Users\\Libram\\AppData\\Local\\Temp\\converted-memory_leak_analyzer_1466366299153852855787.hprof",
-                    "C:\\Users\\Libram\\AppData\\Local\\Temp\\converted-memory_leak_analyzer_14668789654037508480417.hprof").show();
+            new HeapdumpAnalyzer(appInfo.getPackageName(), hprofs).analyze();
         } catch (IOException e) {
+            e.printStackTrace();
+        } catch (InterruptedException e) {
             e.printStackTrace();
         }
     }

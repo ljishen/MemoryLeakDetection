@@ -10,4 +10,13 @@ public class EventRecorder {
         // TODO: Consider a more efficient event recorder
         Util.executeCmd(Util.MONKEY_RUNNER, Util.getResourcePath(this.getClass(), "monkey_recorder.py"));
     }
+
+    // XXX: Only for test
+    public static void main(String[] args) {
+        try {
+            new EventRecorder().record();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
 }

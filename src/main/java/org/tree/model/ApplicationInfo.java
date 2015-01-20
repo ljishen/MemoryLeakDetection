@@ -1,27 +1,55 @@
 package org.tree.model;
 
 public class ApplicationInfo {
-    private final String pid;
-    private final String packageName;
+    private final String deviceSerialNumber;
+    private final String deviceQualifiers;
+    private String packageName;
+    private String pid;
 
-    public ApplicationInfo(String pid, String packageName) {
-        this.pid = pid;
+    public ApplicationInfo(
+            String deviceSerialNumber,
+            String deviceQualifiers) {
+        this.deviceSerialNumber = deviceSerialNumber;
+        this.deviceQualifiers = deviceQualifiers;
+    }
+
+    public String getPackageName() {
+        return packageName;
+    }
+
+    public void setPackageName(String packageName) {
         this.packageName = packageName;
     }
 
-    public String pid() {
+    public String getPid() {
         return pid;
     }
 
-    public String packageName() {
-        return packageName;
+    public void setPid(String pid) {
+        this.pid = pid;
+    }
+
+    public String deviceSerialNumber() {
+        return deviceSerialNumber;
+    }
+
+    public String deviceQualifiers() {
+        return deviceQualifiers;
+    }
+
+    public boolean isValid() {
+        return deviceSerialNumber != null &&
+                packageName != null &&
+                pid != null;
     }
 
     @Override
     public String toString() {
         return "ApplicationInfo{" +
-                "pid='" + pid + '\'' +
+                "deviceSerialNumber='" + deviceSerialNumber + '\'' +
+                ", deviceQualifiers='" + deviceQualifiers + '\'' +
                 ", packageName='" + packageName + '\'' +
+                ", pid='" + pid + '\'' +
                 '}';
     }
 }
