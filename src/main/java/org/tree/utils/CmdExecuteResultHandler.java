@@ -12,7 +12,8 @@ public class CmdExecuteResultHandler extends DefaultExecuteResultHandler {
     private ByteArrayOutputStream out;
     private ByteArrayOutputStream err;
 
-    private volatile String finalOutput;
+    private volatile String standardOutput;
+    private volatile String errOutput;
 
     public CmdExecuteResultHandler(
             ByteArrayOutputStream out, ByteArrayOutputStream err) {
@@ -23,18 +24,20 @@ public class CmdExecuteResultHandler extends DefaultExecuteResultHandler {
     @Override
     public void onProcessComplete(int exitValue) {
         super.onProcessComplete(exitValue);
-        obtainStandardOutputAndCleanUp();
+        try {
+            standardOutput = getStandardOutput();
+        } finally {
+            IOUtils.closeQuietly(out);
+            IOUtils.closeQuietly(err);
+        }
     }
 
     @Override
     public void onProcessFailed(ExecuteException e) {
         super.onProcessFailed(e);
-        obtainStandardOutputAndCleanUp();
-    }
-
-    private void obtainStandardOutputAndCleanUp() {
         try {
-            finalOutput = getStandardOutput();
+            standardOutput = getStandardOutput();
+            errOutput = getErrorOutput();
         } finally {
             IOUtils.closeQuietly(out);
             IOUtils.closeQuietly(err);
@@ -42,6 +45,10 @@ public class CmdExecuteResultHandler extends DefaultExecuteResultHandler {
     }
 
     public String getErrorOutput() {
+        if (errOutput != null) {
+            return errOutput;
+        }
+
         try {
             return err.toString(Charsets.UTF_8.name());
         } catch (UnsupportedEncodingException e) {
@@ -50,14 +57,14 @@ public class CmdExecuteResultHandler extends DefaultExecuteResultHandler {
     }
 
     public String getStandardOutput() {
-        if (finalOutput == null) {
-            try {
-                return out.toString(Charsets.UTF_8.name());
-            } catch (UnsupportedEncodingException e) {
-                throw new RuntimeException(e);
-            }
-        } else {
-            return finalOutput;
+        if (standardOutput != null) {
+            return standardOutput;
+        }
+
+        try {
+            return out.toString(Charsets.UTF_8.name());
+        } catch (UnsupportedEncodingException e) {
+            throw new RuntimeException(e);
         }
     }
 }

@@ -2,7 +2,9 @@ package org.tree;
 
 import org.apache.commons.exec.ExecuteWatchdog;
 import org.apache.commons.io.Charsets;
+import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
+import org.apache.commons.io.filefilter.PrefixFileFilter;
 import org.tree.model.ApplicationInfo;
 import org.tree.utils.CmdExecuteResultHandler;
 import org.tree.utils.Util;
@@ -19,21 +21,26 @@ import java.util.regex.Pattern;
 
 public class HeapdumpAnalyzer {
     private static final Pattern CLASS_INSTANCE_COUNT = Pattern.compile("(\\d+).+class ([\\.\\w\\d\\$\\[\\]]+)");
-    private static final int MINIMUM_FILE_COUNT = 4;
+    private static final int MINIMUM_COMPARISONS = 4;
 
-    private String packageName;
+    private ApplicationInfo appInfo;
     private List<File> hprofs;
 
-    public HeapdumpAnalyzer(String packageName, List<File> hprofs) {
-        this.packageName = packageName;
-        this.hprofs = hprofs;
+    public HeapdumpAnalyzer(ApplicationInfo appInfo, File hprofFolder) {
+        this.appInfo = appInfo;
 
-        if (hprofs.size() < MINIMUM_FILE_COUNT) {
-            throw new IllegalArgumentException("Require at lease " + MINIMUM_FILE_COUNT + " HPROF files to analyze!");
+        hprofs = new ArrayList<File>(
+                FileUtils.listFiles(
+                        hprofFolder,
+                        new PrefixFileFilter(Util.convertedHeapFilePrefix(appInfo.getPid())),
+                        null));
+
+        if (hprofs.size() < MINIMUM_COMPARISONS) {
+            throw new IllegalArgumentException("Require at lease " + MINIMUM_COMPARISONS + " HPROF files to analyze!");
         }
 
         // newer file first
-        Collections.sort(this.hprofs, new Comparator<File>() {
+        Collections.sort(hprofs, new Comparator<File>() {
             @Override
             public int compare(File o1, File o2) {
                 if ((o1).lastModified() > (o2).lastModified()) {
@@ -45,16 +52,18 @@ public class HeapdumpAnalyzer {
                 }
             }
         });
+
+        System.out.println("Found " + hprofs.size() + " HPROF files");
     }
 
     public void analyze() throws IOException, InterruptedException {
         Map<String, List<Integer>> classInstanceCounts = collectClassInstanceCounts();
 
-        System.out.println("\n========= Leak Suspect Classes (Insufficient\tClass\tInstance Counts\tIncrease Ratio\tMin Ratio) =========");
+        System.out.println("\n========= Leak Suspect Classes (Insufficient\tClass\tInstance_Counts\tIncrease_Ratio\tMin_Ratio) =========");
 
         for (Map.Entry<String, List<Integer>> e : classInstanceCounts.entrySet()) {
             List<Integer> counts = e.getValue();
-            if (counts.size() < MINIMUM_FILE_COUNT) {
+            if (counts.size() < MINIMUM_COMPARISONS) {
 //                System.out.println("T\t" + e.getKey() + "\t" + counts + "\t[]\t[]");
                 continue;
             }
@@ -81,6 +90,8 @@ public class HeapdumpAnalyzer {
 
             if (Collections.min(increaseRatio) > 1) {
                 System.out.println("F\t" + e.getKey() + "\t" + counts + "\t" + increaseRatio + "\t" + minRatio);
+            } else {
+//                System.out.println("G\t" + e.getKey() + "\t" + counts + "\t" + increaseRatio + "\t" + minRatio);
             }
         }
     }
@@ -88,16 +99,17 @@ public class HeapdumpAnalyzer {
     private Map<String, List<Integer>> collectClassInstanceCounts() throws InterruptedException, IOException {
         Map<String, List<Integer>> classInstanceCounts = new HashMap<String, List<Integer>>();
 
-        ExecuteWatchdog watchdog = new ExecuteWatchdog(ExecuteWatchdog.INFINITE_TIMEOUT);
         HttpURLConnection connection = null;
         InputStream is = null;
 
         String result;
+        ExecuteWatchdog watchdog = null;
         CmdExecuteResultHandler executeResultHandler = null;
 
         final int checkIntervalInSeconds = 3;
         for (int i = 0; i < hprofs.size(); i++) {
             try {
+                watchdog = new ExecuteWatchdog(ExecuteWatchdog.INFINITE_TIMEOUT);
                 executeResultHandler = Util.executeCmdAsync(watchdog, "jhat", hprofs.get(i).getPath());
                 System.out.println("Parsing HPROF [" + i + "] By jhat...");
 
@@ -132,6 +144,7 @@ public class HeapdumpAnalyzer {
                 IOUtils.closeQuietly(is);
                 IOUtils.close(connection);
                 watchdog.destroyProcess();
+                watchdog = null;
                 executeResultHandler = null;
             }
 
@@ -139,7 +152,7 @@ public class HeapdumpAnalyzer {
             if (m.find()) {
                 do {
                     String className = m.group(2);
-                    if (!className.startsWith("com.wandoujia")) {
+                    if (!className.startsWith(appInfo.getPackageName())) {
                         continue;
                     }
 
@@ -161,16 +174,8 @@ public class HeapdumpAnalyzer {
 
     // XXX: Only for test
     public static void main(String[] args) {
-        ApplicationInfo appInfo = Util.getForegroundAppInfo();
-
-        List<File> hprofs = Arrays.asList(new File("C:\\Users\\Libram\\AppData\\Local\\Temp\\converted-memory_leak_analyzer_68134881204037259280478.hprof"),
-                new File("C:\\Users\\Libram\\AppData\\Local\\Temp\\converted-memory_leak_analyzer_6813774127410050284883.hprof"),
-                new File("C:\\Users\\Libram\\AppData\\Local\\Temp\\converted-memory_leak_analyzer_68131730521599528387336.hprof"),
-                new File("C:\\Users\\Libram\\AppData\\Local\\Temp\\converted-memory_leak_analyzer_68131063480794662111285.hprof"),
-                new File("C:\\Users\\Libram\\AppData\\Local\\Temp\\converted-memory_leak_analyzer_68136283695343741391967.hprof"));
-
         try {
-            new HeapdumpAnalyzer(appInfo.getPackageName(), hprofs).analyze();
+            new HeapdumpAnalyzer(Util.getForegroundAppInfo(), new File("C:\\Users\\Libram\\Desktop\\com.androidcentral.app")).analyze();
         } catch (IOException e) {
             e.printStackTrace();
         } catch (InterruptedException e) {

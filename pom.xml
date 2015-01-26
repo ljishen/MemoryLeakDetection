@@ -3,11 +3,11 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>org.tree</groupId>
-    <artifactId>android-memory-leak-analyzer</artifactId>
+    <artifactId>android-memory-leak-detection</artifactId>
     <version>1.0-SNAPSHOT</version>
     <packaging>jar</packaging>
 
-    <name>android-memory-leak-analyzer</name>
+    <name>android-memory-leak-detection</name>
     <url>http://maven.apache.org</url>
 
     <properties>

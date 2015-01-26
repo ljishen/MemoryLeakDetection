@@ -37,12 +37,6 @@ public class ApplicationInfo {
         return deviceQualifiers;
     }
 
-    public boolean isValid() {
-        return deviceSerialNumber != null &&
-                packageName != null &&
-                pid != null;
-    }
-
     @Override
     public String toString() {
         return "ApplicationInfo{" +

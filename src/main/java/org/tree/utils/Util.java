@@ -22,7 +22,11 @@ public class Util {
     private static final String CONVERTED_HEAP_FILE_PREFIX = "converted-";
     private static final String LOCAL_HEAP_FILE_PREFIX = "memory_leak_analyzer_";
     private static final String HEAP_FILE_SUFFIX = ".hprof";
-    private static final Pattern PACKAGE_NAME = Pattern.compile("Recent #0.+?=([\\.\\w]+)");
+
+    private static final String PACKAGE_NAME = "([\\.\\w\\d]+)";
+    private static final Pattern PACKAGE_NAME_P1 = Pattern.compile("Recent #0.+?=" + PACKAGE_NAME);
+    private static final Pattern PACKAGE_NAME_P2 = Pattern.compile("Recent #0.+?\\{.+? .+? .+? " + PACKAGE_NAME);
+
     private static final Pattern PID = Pattern.compile("\\n.+?\\s(\\d+)");
     private static final Pattern DEVICE_INFO =
             Pattern.compile("List of devices attached[\\s]+([\\-\\d\\w+]+)\\s+device\\s?([^\\r\\n]*)");
@@ -41,18 +45,13 @@ public class Util {
         CmdExecuteResultHandler resultHandler = new CmdExecuteResultHandler(out, err);
 
         // TODO: use log4j instead, debug mode
-        System.err.println("Execute: " + cmdLine);
+        System.out.println("Execute: " + cmdLine);
 
         try {
             executor.execute(cmdLine, resultHandler);
-        } catch (ExecuteException e) {
-            // TODO: use log4j instead
-            System.err.println(err.toString(Charsets.UTF_8.name()));
-
+        } finally {
             IOUtils.closeQuietly(out);
             IOUtils.closeQuietly(err);
-
-            throw e;
         }
         return resultHandler;
     }
@@ -85,25 +84,25 @@ public class Util {
         Executor executor = createExecutor(out, err, null);
 
         // TODO: use log4j instead, debug mode
-        System.err.println("Execute: " + cmdLine);
+        System.out.println("Execute: " + cmdLine);
 
         try {
             int exitValue = executor.execute(cmdLine);
 
             String output = out.toString(Charsets.UTF_8.name());
-
             if (output.contains("Exception:") || StringUtils.containsIgnoreCase(output, "error:")) {
-                throw new ExecuteException(output, exitValue);
+                throw new ExecuteException("Standard Output Contains Error", exitValue);
             }
             return output;
-        } catch (ExecuteException e) {
+        } catch (IOException e) {
             // TODO: use log4j instead
+            System.err.println(out.toString(Charsets.UTF_8.name()));
             System.err.println(err.toString(Charsets.UTF_8.name()));
 
             throw e;
         } finally {
-            out.close();
-            err.close();
+            IOUtils.closeQuietly(out);
+            IOUtils.closeQuietly(err);
         }
     }
 
@@ -134,7 +133,7 @@ public class Util {
         // Wait until heap file created
         long lastFileSize;
         long fileSize = 0;
-        final int checkIntervalInSeconds = 5;
+        final int checkIntervalInSeconds = 6;
         do {
             System.out.println("Check heap dump after " + checkIntervalInSeconds + " seconds...");
             Thread.sleep(TimeUnit.SECONDS.toMillis(checkIntervalInSeconds));
@@ -161,7 +160,7 @@ public class Util {
     }
 
     private static String localHeapFilename(String pid) {
-        return LOCAL_HEAP_FILE_PREFIX + pid;
+        return LOCAL_HEAP_FILE_PREFIX + pid + "_";
     }
 
     public static String convertedHeapFilePrefix(String pid) {
@@ -178,51 +177,54 @@ public class Util {
         return Long.valueOf(StringUtils.substringBefore(output, " "));
     }
 
-    public static ApplicationInfo getForegroundAppInfo() {
+    public static ApplicationInfo getForegroundAppInfo() throws IOException {
         ApplicationInfo appInfo = null;
-        try {
-            String devicesInfo = executeCmd(ADB, "devices", "-l");
-            Matcher m = DEVICE_INFO.matcher(devicesInfo);
-            if (m.find()) {
-                appInfo = new ApplicationInfo(m.group(1), m.group(2));
-                System.out.println("Select device " + appInfo.deviceSerialNumber());
-            } else {
-                return appInfo;
-            }
-
-            String activitiesInfo = Util.executeCmd(
-                    Util.ADB,
-                    "-s",
-                    appInfo.deviceSerialNumber(),
-                    Util.SHELL,
-                    "dumpsys",
-                    "activity",
-                    "activities");
-            m = PACKAGE_NAME.matcher(activitiesInfo);
-            if (m.find()) {
-                appInfo.setPackageName(m.group(1));
-                int length = appInfo.getPackageName().length();
-
-                // In command "adb shell ps [package]", package name can only be matched with its last 15 characters.
-                String packageAbbreviation = length > 15 ?
-                        appInfo.getPackageName().substring(length - 15, length) : appInfo.getPackageName();
-
-                String pidInfo = Util.executeCmd(
-                        Util.ADB,
-                        "-s",
-                        appInfo.deviceSerialNumber(),
-                        Util.SHELL,
-                        "ps",
-                        packageAbbreviation);
-                m = PID.matcher(pidInfo);
-                if (m.find()) {
-                    appInfo.setPid(m.group(1));
-                }
-            }
-        } catch (IOException e) {
-            // TODO: use log4j instead
-            e.printStackTrace();
+        String devicesInfo = executeCmd(ADB, "devices", "-l");
+        Matcher m = DEVICE_INFO.matcher(devicesInfo);
+        if (m.find()) {
+            appInfo = new ApplicationInfo(m.group(1), m.group(2));
+            System.out.println("Select device " + appInfo.deviceSerialNumber());
+        } else {
+            throw new IOException("No device online!");
         }
+
+        String activitiesInfo = Util.executeCmd(
+                Util.ADB,
+                "-s",
+                appInfo.deviceSerialNumber(),
+                Util.SHELL,
+                "dumpsys",
+                "activity",
+                "activities");
+
+        m = PACKAGE_NAME_P1.matcher(activitiesInfo);
+        if (!m.find()) {
+            m = PACKAGE_NAME_P2.matcher(activitiesInfo);
+            if (!m.find()) {
+                throw new IOException("Cannot Found Foreground Package Name!");
+            }
+        }
+
+        appInfo.setPackageName(m.group(1));
+        int length = appInfo.getPackageName().length();
+
+        // In command "adb shell ps [package]", package name can only be matched with its last 15 characters.
+        String packageAbbreviation = length > 15 ?
+                appInfo.getPackageName().substring(length - 15, length) : appInfo.getPackageName();
+
+        String pidInfo = Util.executeCmd(
+                Util.ADB,
+                "-s",
+                appInfo.deviceSerialNumber(),
+                Util.SHELL,
+                "ps",
+                packageAbbreviation);
+        m = PID.matcher(pidInfo);
+
+        if (!m.find()) {
+            throw new IOException("Cannot Found Foreground App PID!");
+        }
+        appInfo.setPid(m.group(1));
 
         // TODO: use log4j inform mode instead
         System.out.println(appInfo);
@@ -232,9 +234,8 @@ public class Util {
 
     // XXX: Only for test
     public static void main(String[] args) {
-        ApplicationInfo appInfo = getForegroundAppInfo();
         try {
-            dumpheap(appInfo);
+            dumpheap(getForegroundAppInfo());
         } catch (IOException e) {
             e.printStackTrace();
         } catch (InterruptedException e) {
